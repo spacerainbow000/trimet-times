@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os
+import sys
+import signal
 import time
 import calendar
 import configparser
@@ -30,6 +32,7 @@ train_stop = parser.get('TRAINS', 'train_stop')
 bus_stops = [x.strip() for x in parser.get('BUSES', 'bus_stops').split(',')]
 
 arrivals_arr = []
+arrivals_const = []
 
 # create temp file to hold bash script for printing
 tf = tempfile.NamedTemporaryFile(delete=False)
@@ -149,22 +152,39 @@ def get_bus_data(stop_id):
 
 def update_times():
     while True:
+        global update_times_running
+        global arrivals_const
+        arrivals_const = arrivals_arr.copy()
+        update_times_running = True
         del arrivals_arr[:]
         logwrite("getting train data for stop %s" % (train_stop,), "INFO")
         get_train_data(train_stop)
         for bus in bus_stops:
             logwrite("getting bus data for stop %s" % (bus,), "INFO")
             get_bus_data(bus)
+        update_times_running = False
         time.sleep(10)
 
 
 def update_display():
+    global update_times_running
+    global arrivals_arr
+    global arrivals_const
     while True:
+        # decide whether to use arrivals_arr or arrivals_const depending on whether update_times is running
+        if update_times_running:
+            logwrite("update_times is running, using arrivals_const instead of arrivals_arr", "DEBUG")
+            logwrite("arrivals_const data: %s" % (arrivals_const,), "DEBUG")
+            logwrite(dir(arrivals_const), "DEBUG")
+            logwrite("".join([str(x) for x in arrivals_const]), "DEBUG")
+            use_arr = arrivals_const.copy()
+        else:
+            use_arr = arrivals_arr
         starttime = time.time()
         printstring = ""
         # train times
         printstring = "next trains:\n"
-        for arr in arrivals_arr:
+        for arr in use_arr:
             h = 0
             m = 0
             s = 0
@@ -176,11 +196,11 @@ def update_display():
                 else:
                     printstring += ('\033[1;34m' + 'blue' + '\033[1;37m' + ' line ')
                 if arr.is_delayed == "cancelled":
-                    printstring += "\t(CANCELLED)\n"
+                    printstring += "in\t(CANCELLED)\n"
                 elif arr.is_delayed == "delayed":
-                    printstring += "\t(DELAYED)\n"
+                    printstring += "in\t(DELAYED)\n"
                 elif (arr.arrival_time / 1000) < calendar.timegm(time.gmtime()):
-                    printstring += "\tARRIVED!\n"
+                    printstring += "in\t(ARRIVED)\n"
                 else:
                     # on time
                     m, s = divmod((int(int(arr.arrival_time) / 1000) - int(calendar.timegm(time.gmtime()))), 60)
@@ -211,11 +231,11 @@ def update_display():
                 printstring += str(arr.line_id)
                 printstring += " "
                 if arr.is_delayed == "cancelled":
-                    printstring += "\t\t(CANCELLED)\n"
+                    printstring += "in\t\t(CANCELLED)\n"
                 elif arr.is_delayed == "delayed":
-                    printstring += "\t\t(DELAYED)\n"
+                    printstring += "in\t\t(DELAYED)\n"
                 elif (arr.arrival_time / 1000) < calendar.timegm(time.gmtime()):
-                    printstring += "\t\tARRIVED!\n"
+                    printstring += "in\t\t(ARRIVED)\n"
                 else:
                     # on time
                     m, s = divmod((int(int(arr.arrival_time) / 1000) - int(calendar.timegm(time.gmtime()))), 60)
@@ -245,10 +265,21 @@ def update_display():
 
 
 def main():
+    global update_times_running
     Thread(target = update_times).start()
     time.sleep(4)
     Thread(target = update_display).start()
 
+
+def signal_handler(sig, frame):
+    tf.close()
+    ptf.close()
+    os.unlink(tfile)
+    os.unlink(ptfile)
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
 
 if __name__ ==  '__main__':
     main()
