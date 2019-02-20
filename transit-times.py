@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import os
-import sys
 import time
 import calendar
+import configparser
+import tempfile
 from datetime import datetime
 import urllib.request
 import xml.etree.ElementTree
@@ -12,8 +13,13 @@ try:
 except ImportError:
     from io import StringIO
 
-#read initial configuration options from file
-import configparser
+import manhole
+manhole.install()
+
+# clear terminal for writing
+os.system('clear')
+
+# read initial configuration options from file
 parser = configparser.RawConfigParser()
 config_path = os.path.dirname(os.path.realpath(__file__)) + '/transit-times.conf'
 parser.read(config_path)
@@ -21,9 +27,33 @@ loglevel = parser.get('DEFAULT', 'loglevel')
 
 app_id = parser.get('DEFAULT', 'app_id')
 train_stop = parser.get('TRAINS', 'train_stop')
-bus_stops = [ x.strip() for x in parser.get('BUSES', 'bus_stops').split(',')]
+bus_stops = [x.strip() for x in parser.get('BUSES', 'bus_stops').split(',')]
 
 arrivals_arr = []
+
+# create temp file to hold bash script for printing
+tf = tempfile.NamedTemporaryFile(delete=False)
+tfile = tf.name
+tf.write(b'HOME=$(tput cup 0 0)\n')
+tf.write(b'ED=$(tput ed)\n')
+tf.write(b'EL=$(tput el)\n')
+tf.write(b'COLS=$(tput cols)\n')
+tf.write(b'CONTENTS=$(echo -e "$(cat ${1})" | awk "NF > 0" | expand -t 4 | sed "/------------------/q")$(echo ; echo -e "$(cat ${1})" | awk "NF > 0" | expand -t 4 | awk "f{print;} /---/{f=1}" | sed "s/in/in  /g")\n')
+tf.write(b'while read -r LINE ;\n')
+tf.write(b'do\n')
+tf.write(b'''    printf '%-*.*s%s\n' ${COLS} ${COLS} "${LINE}" "${EL}"''')
+tf.write(b'\n')
+# tf.write(b'done <<< $(echo -e "$(cat ${1})" | awk "NF > 0" | expand -t 4)\n')
+tf.write(b'done <<< "${CONTENTS}"\n')
+tf.write(b'''printf '%s%s' "${ED}" "${HOME}"''')
+tf.flush()
+os.chmod(tfile, 0o777)  # make executable for later
+
+# create another temp file to hold text to print
+ptf = tempfile.NamedTemporaryFile(delete=False)
+ptfile = ptf.name
+os.chmod(tfile, 0o666)  # make universally readable for later
+
 
 def logwrite(entry, loglevel_):
     try:
@@ -37,13 +67,14 @@ def logwrite(entry, loglevel_):
             f.write('[ %s ] [ %s ] %s' % (datetime.now().isoformat(), loglevel_.upper(), entry,))
             f.write('\n')
             f.close()
-    except KeyError as e:
-        #unknown log level
+    except KeyError:
+        # unknown log level
         if loglevel.upper() == loglevel_.upper():
             f = open('log', 'a')
             f.write('[ %s ] [ %s ] %s' % (datetime.now().isoformat(), loglevel_.upper(), entry,))
             f.write('\n')
             f.close()
+
 
 class arrival:
     def __init__(self, is_bus, is_delayed, line_id, arrival_time):
@@ -52,9 +83,10 @@ class arrival:
         self.line_id = line_id
         self.arrival_time = arrival_time
 
+
 def get_stop_data(stop_id):
     arrivals_url = 'http://developer.trimet.org/ws/V1/arrivals/locIDs/' + str(stop_id) + '/appID/' + str(app_id)
-    with  urllib.request.urlopen(arrivals_url) as arrivals_reader:
+    with urllib.request.urlopen(arrivals_url) as arrivals_reader:
         try:
             arrivals_data = arrivals_reader.read()
         except IOError:
@@ -65,17 +97,18 @@ def get_stop_data(stop_id):
             exit(1)
         return arrivals_data
 
+
 def get_train_data(stop_id):
     arrivals_data = get_stop_data(stop_id)
     arrivals_tree = xml.etree.ElementTree.parse(StringIO(arrivals_data.decode('utf-8')))
     for node in arrivals_tree.findall('.//{urn:trimet:arrivals}arrival'):
         arrival_time = None
-        #get line type
+        # get line type
         if "Red Line" in node.attrib['fullSign']:
             line_color = "red"
         else:
             line_color = "blue"
-        #get status and arrival time
+        # get status and arrival time
         if node.attrib['status'] == "cancelled":
             is_delayed = "cancelled"
         elif node.attrib['status'] == "delayed":
@@ -89,15 +122,16 @@ def get_train_data(stop_id):
             except Exception as e:
                 logwrite("uncaught exception:\n%s" % (e,), 'ERROR')
                 exit(1)
-        #add to arrival times array
+        # add to arrival times array
         arrivals_arr.append(arrival(is_bus = "no", is_delayed = is_delayed, line_id = line_color, arrival_time = arrival_time))
+
 
 def get_bus_data(stop_id):
     arrivals_data = get_stop_data(stop_id)
     arrivals_tree = xml.etree.ElementTree.parse(StringIO(arrivals_data.decode('utf-8')))
     for node in arrivals_tree.findall('.//{urn:trimet:arrivals}arrival'):
         arrival_time = None
-        #get status and arrival time
+        # get status and arrival time
         if node.attrib['status'] == "cancelled":
             is_delayed = "cancelled"
         elif node.attrib['status'] == "delayed":
@@ -105,12 +139,13 @@ def get_bus_data(stop_id):
         elif node.attrib['status'] == "estimated":
             is_delayed = "on time"
             arrival_time = int(node.attrib['estimated'])
-        else: # node.attrib["status"] = "scheduled"
+        else:  # node.attrib["status"] = "scheduled"
             is_delayed = "on time"
             arrival_time = int(node.attrib['scheduled'])
-            #add to arrival times array
+            # add to arrival times array
         bus_line = int(node.attrib['route'])
         arrivals_arr.append(arrival(is_bus = "yes", is_delayed = is_delayed, line_id = bus_line, arrival_time = arrival_time))
+
 
 def update_times():
     while True:
@@ -122,18 +157,19 @@ def update_times():
             get_bus_data(bus)
         time.sleep(10)
 
+
 def update_display():
     while True:
-        starttime=time.time()
+        starttime = time.time()
         printstring = ""
-        #train times
+        # train times
         printstring = "next trains:\n"
         for arr in arrivals_arr:
             h = 0
             m = 0
             s = 0
             if arr.is_bus == "no":
-                #train found
+                # train found
                 line_color = arr.line_id
                 if line_color == "red":
                     printstring += ('\033[1;31m' + 'red' + '\033[1;37m' + ' line ')
@@ -146,7 +182,7 @@ def update_display():
                 elif (arr.arrival_time / 1000) < calendar.timegm(time.gmtime()):
                     printstring += "\tARRIVED!\n"
                 else:
-                    #on time
+                    # on time
                     m, s = divmod((int(int(arr.arrival_time) / 1000) - int(calendar.timegm(time.gmtime()))), 60)
                     if m > 59:
                         h, m = divmod(m, 60)
@@ -159,12 +195,12 @@ def update_display():
                     printstring += str(m)
                     printstring += ":"
                     if len(str(s)) == 1:
-                            printstring += "0"
+                        printstring += "0"
                     printstring += str(s)
                     printstring += '\n'
-        #separator
+        # separator
         printstring += '------------------\n'
-        #bus times
+        # bus times
         printstring += "next buses:\n"
         for arr in arrivals_arr:
             h = 0
@@ -179,9 +215,9 @@ def update_display():
                 elif arr.is_delayed == "delayed":
                     printstring += "\t\t(DELAYED)\n"
                 elif (arr.arrival_time / 1000) < calendar.timegm(time.gmtime()):
-                    printstring += "\t\tARRIVED!\n" 
+                    printstring += "\t\tARRIVED!\n"
                 else:
-                    #on time
+                    # on time
                     m, s = divmod((int(int(arr.arrival_time) / 1000) - int(calendar.timegm(time.gmtime()))), 60)
                     if m > 59:
                         h, m = divmod(m, 60)
@@ -196,17 +232,23 @@ def update_display():
                     if len(str(s)) == 1:
                         printstring += "0"
                     printstring += str(s)
-                    printstring += '\n'
-        #wipe screen then write
-        os.system('clear')
-        print(printstring)
-        #sleep (1 - execution time) seconds
+                    printstring += "\n"
+        # wipe screen then write
+        execstring = 'bash ' + tfile + ' ' + ptfile
+        ptf.seek(0)
+        ptf.truncate()  # clear file before writing new contents to write to terminal
+        ptf.write(str.encode(printstring))
+        ptf.flush()
+        os.system(execstring)
+        # sleep (1 - execution time) seconds
         time.sleep(1.0 - ((time.time() - starttime) % 60.0))
+
 
 def main():
     Thread(target = update_times).start()
     time.sleep(4)
     Thread(target = update_display).start()
+
 
 if __name__ ==  '__main__':
     main()
