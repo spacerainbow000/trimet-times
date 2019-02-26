@@ -292,7 +292,10 @@ def update_display():
             ptf.flush()
             os.system(execstring)
             # sleep (1 - execution time) seconds
-            time.sleep(1.0 - ((time.time() - starttime) % 60.0))
+            try:
+                time.sleep(1.0 - ((time.time() - starttime) % 60.0))
+            except ValueError:
+                time.sleep(1)
 
 
 def main():
